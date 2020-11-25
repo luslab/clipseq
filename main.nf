@@ -683,15 +683,8 @@ process cutadapt {
 
     script:
 
-    read_ext = reads.getName().split('\\.', 2)[1]
-    read_name = reads.getName().split('\\.', 2)[0]
-    new_reads = "${name}_trim.${read_ext}"
-    new_reads_simple = "${name}_trim"
-
     """
-    cp ${reads} ${new_reads}
-    rm *${read_name}*
-    cutadapt -j $task.cpus -a ${params.adapter} -m 12 -o ${name}.fastq.gz $new_reads > ${name}_cutadapt.log
+    cutadapt -j $task.cpus -a ${params.adapter} -m 12 -o ${name}.trimmed.fastq.gz $input > ${name}_cutadapt.log
     """
 
 }
