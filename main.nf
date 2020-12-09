@@ -27,6 +27,7 @@ def helpMessage() {
 
     Options:
       --genome [str]                  Name of iGenomes reference
+      --smrna_species                 Species for small RNA reference. Available: human, mouse, rat
 
     References:                       If not specified in the configuration file or you wish to overwrite any of the references
       --fasta [file]                  Path to genome fasta reference
@@ -49,6 +50,8 @@ def helpMessage() {
       --min_value [int]               Paraclu minimum cluster count/value (default: 10)
       --min_density_increase [int]    Paraclu minimum density increase (default: 2)
       --max_cluster_length [int]      Paraclu maximum cluster length (default: 2)
+      --bc [int]                      PureCLIP flag to set parameters according to binding characteristics of protein (default: 0)
+      --dm [str]                      PureCLIP merge distnace (default: 8)
 
     Other options:
       --outdir [file]                 The output directory where the results will be saved
@@ -64,6 +67,8 @@ def helpMessage() {
       --awscli [str]                  Path to the AWS CLI tool
     """.stripIndent()
 }
+
+    //   --iv [str]                      PureCLIP genomic chromosomes to learn HMM parameters, (default: 'chr1;chr2;chr3')
 
 // Show help message
 if (params.help) {
@@ -92,11 +97,22 @@ if (params.genomes && params.genome && !params.genomes.containsKey(params.genome
 // //
 // }
 
+// Option for user supplied fasta and gtf and pipeline supplied smRNA
+def smrna_list = ['human', 'mouse', 'rat']
+if (!params.genome && params.smrna_species) {
+    if (params.smrna_species in smrna_list) {
+        params.smrna_fasta = params.smrna[ params.smrna_species ].smrna_fasta
+    } else {
+        log.warn "There is no smRNA available for species '${params.smrna_species}'; pre-mapping will be skipped. Currently available options are: human, mouse, rat. Alternative you can supply your own smRNA fasta using --smrna_fasta"
+    }
+} else {
+    params.smrna_fasta = params.genome ? params.smrna[ params.genome ].smrna_fasta ?: false : false
+}
+
 // Auto-load genome files from genome config
 params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 params.gtf = params.genome ? params.genomes[ params.genome ].gtf ?: false : false
 params.star_index = params.genome ? params.genomes[ params.genome ].star ?: false : false
-params.smrna_fasta = params.genome ? params.smrna[ params.genome ].smrna_fasta ?: false : false
 
 // Check input path parameters to see if they exist
 checkPathParamList = [
@@ -113,36 +129,14 @@ if(!params.smrna_fasta) {
     if(params.genome) {
         log.warn "There is no available smRNA fasta file associated with the provided genome '${params.genome}'; pre-mapping will be skipped. A smRNA fasta file can be specified on the command line with --smrna_fasta"
     } else {
-        log.warn "There is no smRNA fasta file suppled or genome specified; pre-mapping will be skipped. A smRNA fasta file can be specified on the command line with --smrna_fasta"
+        log.warn "There is no smRNA fasta file suppled for genome specified; pre-mapping will be skipped. A smRNA fasta file can be specified on the command line with --smrna_fasta or --smrna_species"
     }
 }
-
-// Configurable reference genome variables
-// if (!params.fasta && params.genome && params.genomes[ params.genome ].fasta) {
-//     if (file(params.genomes[ params.genome ].fasta).exists()) {
-//         params.fasta = params.genomes[ params.genome ].fasta
-//     }
-// } else {
-//     params.fasta = false
-// }
-// if (!params.gtf && params.genome && params.genomes[ params.genome ].gtf) {
-//     if (file(params.genomes[ params.genome ].gtf).exists()){
-//         params.gtf = params.genomes[ params.genome ].gtf
-//     }
-// } else {
-//     params.gtf = false
-// }
-// if (!params.star_index && params.genome && params.genomes[ params.genome ].star) {
-//     if (file(params.genomes[ params.genome ].star).exists()){
-//         params.star_index = params.genomes[ params.genome ].star
-//     }
-// } else {
-//     params.star_index = false
-// }
 
 // Set up peak caller logic
 def paraclu_check = false
 def icount_check = false
+def pureclip_check = false
 if (params.peakcaller){
 
     def peak_list = params.peakcaller.split(',').collect()
@@ -155,8 +149,10 @@ if (params.peakcaller){
             paraclu_check = true
         } else if ( it == 'icount' && !icount_check ) {
             icount_check = true
+        } else if ( it == 'pureclip' && !pureclip_check ) {
+            pureclip_check = true
         } else {
-            exit 1, "Invalid peak caller option: ${it}. Valid options: 'icount', 'paraclu'"
+            exit 1, "Invalid peak caller option: ${it}. Valid options: 'icount', 'paraclu', 'pureclip'"
         }
     }
 }
@@ -167,26 +163,32 @@ if (!params.gtf && icount_check) {
     log.warn "iCount can only be run with a gtf annotation file - iCount will be skipped"
 }
 
-// Check compatability of gtf file with iCount if both supplied
-// if ( icount_check &&  params.gtf ) {
-//     process gtf_check_genes {
-//         tag "$gtf"
-
-//         input:
-//         path(gtf) from ch_check_gtf
-
-//         output:
-
-
-//         script:
-
-//         """
-
-//         """
+// // Check compatibility of gtf file with iCount if both supplied
+// if (params.gtf && icount_check) {
+//     def gtf_check = false
+//     File gtf_file = new File(params.gtf)
+//     def data= gtf_file.eachLine { line ->
+//         if (line.contains('ensembl') || line.contains('GENCODE')) {
+//             gtf_check = true
+//         }
 //     }
-//     if (!genes_check) {
-//         log.warn " Genes are not included in the gtf annotation, which is needed for iCount. iCount peakcaller will be skipped "
+//     if (!gtf_check) {
 //         icount_check = false
+//         log.warn "The supplied gtf file is not compatible with iCount. Peakcalling with iCount will be skipped"
+//     }
+// }
+
+// // Check version of STAR index for compatibility
+// if (params.star_index) {
+//     File star_log_file = new File(params.star_index + "Log.out")
+//     def data= star_log_file.eachLine { line ->
+//         if (line.contains('STAR version=')) {
+//             star_version = line.findAll( /\d+/ )*.toInteger()
+//             print "${star_version[0]}"
+//             if(star_version[0] != 2 || (star_version[1] != 6 && star_version[1] != 5)) {
+//                 exit 1, "The version of STAR used to create the STAR index is incompatible. Please use version 2.5 or 2.6."
+//             }
+//         }
 //     }
 // }
 
@@ -397,7 +399,7 @@ if (params.fasta) {
         Channel
             .fromPath(params.fasta, checkIfExists: true)
             .ifEmpty { exit 1, "Genome reference fasta not found: ${params.fasta}" }
-            .into { ch_fasta; ch_fasta_fai; ch_fasta_dreme_icount; ch_fasta_dreme_paraclu }
+            .into { ch_fasta; ch_fasta_fai; ch_fasta_dreme_icount; ch_fasta_dreme_paraclu; ch_fasta_pureclip; ch_fasta_dreme_pureclip }
     }
 }
 
@@ -412,8 +414,8 @@ if (params.fasta) {
             input:
             path(fasta_gz) from ch_fasta_gz
 
-                output:
-                path("*.fa") into (ch_fasta, ch_fasta_fai, ch_fasta_dreme, ch_fasta_dreme_paraclu )
+            output:
+            path("*.fa") into (ch_fasta, ch_fasta_fai, ch_fasta_dreme_icount, ch_fasta_dreme_paraclu, ch_fasta_pureclip, ch_fasta_dreme_pureclip)
 
             script:
 
@@ -437,7 +439,7 @@ if (!params.fai) {
             path(fasta) from ch_fasta_fai
 
             output:
-            path("*.fai") into (ch_fai_crosslinks, ch_fai_icount, ch_fai_icount_motif, ch_fai_paraclu_motif, ch_fai_size)
+            path("*.fai") into (ch_fai_crosslinks, ch_fai_icount, ch_fai_icount_motif, ch_fai_paraclu_motif, ch_fai_pureclip_motif, ch_fai_size)
 
             script:
 
@@ -784,7 +786,7 @@ if (params.deduplicate) {
         tuple val(name), path(bam), path(bai) from ch_aligned
 
         output:
-        tuple val(name), path("${name}.dedup.bam"), path("${name}.dedup.bam.bai") into ch_dedup
+        tuple val(name), path("${name}.dedup.bam"), path("${name}.dedup.bam.bai") into ch_dedup, ch_dedup_pureclip
         path "*.log" into ch_dedup_mqc
 
         script:
@@ -852,7 +854,7 @@ if (params.peakcaller && icount_check) {
         path(segment) from ch_segment.collect()
 
         output:
-        tuple val(name), path("${name}.${half_window}nt.sigxl.bed.gz") into ch_sigxlinks
+        tuple val(name), path("${name}.${half_window}nt.sigxl.bed.gz") into ch_sigxls_icount
         tuple val(name), path("${name}.${half_window}nt_${merge_window}nt.peaks.bed.gz") into ch_peaks_icount
 
         script:
@@ -926,7 +928,7 @@ if (params.peakcaller && paraclu_check) {
 
         """
         pigz -d -c $xlinks | \
-        awk '{OFS = "\t"}{print \$1, \$6, \$2, \$5}' | \
+        awk '{OFS = "\t"}{print \$1, \$6, \$3, \$5}' | \
         sort -k1,1 -k2,2 -k3,3n > paraclu_input.tsv
 
         paraclu ${min_value} paraclu_input.tsv | \
@@ -951,6 +953,77 @@ if (params.peakcaller && paraclu_check) {
 
         output:
         tuple val(name), path("${name}_dreme/*") into ch_motif_dreme_paraclu
+
+        script:
+
+        """
+        pigz -d -c $peaks | awk '{OFS="\t"}{if(\$6 == "+") print \$1, \$2, \$2+1, \$4, \$5, \$6; else print \$1, \$3-1, \$3, \$4, \$5, \$6}' | \
+        bedtools slop -s -l 20 -r 20 -i /dev/stdin -g $fai > resized_peaks.bed
+
+        bedtools getfasta -fi $fasta -bed resized_peaks.bed -fo resized_peaks.fasta
+
+        dreme -norc -o ${name}_dreme -p resized_peaks.fasta
+        """
+
+    }
+
+}
+
+/*
+ * STEP 7b - Peak-call (PureCLIP)
+ */
+
+if (params.peakcaller && pureclip_check) {
+
+    process pureclip_peak_call {
+
+        tag "$name"
+        label 'process_high'
+        publishDir "${params.outdir}/pureclip", mode: params.publish_dir_mode
+
+        input:
+        tuple val(name), path(bam), path(bai) from ch_dedup_pureclip
+        path(fasta) from ch_fasta_pureclip.collect()
+
+        output:
+        tuple val(name), path("${name}.sigxl.bed.gz") into ch_sigxlinks_pureclip
+        tuple val(name), path("${name}.${dm}nt.peaks.bed.gz") into ch_peaks_pureclip
+
+        script:
+
+        // iv = params.iv
+        bc = params.bc
+        dm = params.dm
+
+        """
+        pureclip \
+        -i $bam \
+        -bai $bai \
+        -g $fasta \
+        -nt $task.cpus \
+        -bc $bc \
+        -dm $dm \
+        -o "${name}.sigxl.bed" \
+        -or "${name}.${dm}nt.peaks.bed"
+
+        pigz ${name}.sigxl.bed ${name}.${dm}nt.peaks.bed
+        """
+
+    }
+
+    process pureclip_motif_dreme {
+
+        tag "$name"
+        label 'process_low'
+        publishDir "${params.outdir}/pureclip_motif", mode: params.publish_dir_mode
+
+        input:
+        tuple val(name), path(peaks) from ch_peaks_pureclip
+        path(fasta) from ch_fasta_dreme_pureclip.collect()
+        path(fai) from ch_fai_pureclip_motif.collect()
+
+        output:
+        tuple val(name), path("${name}_dreme/*") into ch_motif_dreme_pureclip
 
         script:
 
@@ -1082,6 +1155,44 @@ NF-CORE ON COMPLETE
 //     if (!params.email && params.email_on_fail && !workflow.success) {
 //         email_address = params.email_on_fail
 //     }
+
+// <<< FROM TEMPLATE 1.12.1 update
+
+    // Render the TXT template
+    // def engine = new groovy.text.GStringTemplateEngine()
+    // def tf = new File("$projectDir/assets/email_template.txt")
+    // def txt_template = engine.createTemplate(tf).make(email_fields)
+    // def email_txt = txt_template.toString()
+
+    // Render the HTML template
+    // def hf = new File("$projectDir/assets/email_template.html")
+    // def html_template = engine.createTemplate(hf).make(email_fields)
+    // def email_html = html_template.toString()
+
+    // Render the sendmail template
+    // def smail_fields = [ email: email_address, subject: subject, email_txt: email_txt, email_html: email_html, projectDir: "$projectDir", mqcFile: mqc_report, mqcMaxSize: params.max_multiqc_email_size.toBytes() ]
+    // def sf = new File("$projectDir/assets/sendmail_template.txt")
+    // def sendmail_template = engine.createTemplate(sf).make(smail_fields)
+    // def sendmail_html = sendmail_template.toString()
+
+    // Send the HTML e-mail
+    // if (email_address) {
+    //    try {
+    //        if (params.plaintext_email) { throw GroovyException('Send plaintext e-mail, not HTML') }
+    //        // Try to send HTML e-mail using sendmail
+    //        [ 'sendmail', '-t' ].execute() << sendmail_html
+    //        log.info "[nf-core/clipseq] Sent summary e-mail to $email_address (sendmail)"
+    //    } catch (all) {
+    //        // Catch failures and try with plaintext
+    //        def mail_cmd = [ 'mail', '-s', subject, '--content-type=text/html', email_address ]
+    //        if ( mqc_report.size() <= params.max_multiqc_email_size.toBytes() ) {
+    //          mail_cmd += [ '-A', mqc_report ]
+    //        }
+    //        mail_cmd.execute() << email_html
+    //        log.info "[nf-core/clipseq] Sent summary e-mail to $email_address (mail)"
+    //    }
+
+// >>>
 
 //     // Render the TXT template
 //     def engine = new groovy.text.GStringTemplateEngine()
